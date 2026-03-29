@@ -1,0 +1,8 @@
+packages:
+  - "packages/*"
+  - "server"
+  - "plugin-obsidian"
+  - "plugin-vscode"
+  - "cli"
+  - "mcp-server"
+  - "web"
