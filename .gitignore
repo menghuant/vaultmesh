@@ -40,3 +40,8 @@ coverage/
 
 # Turbo
 .turbo/
+
+# gstack compiled binaries
+.claude/skills/gstack/bin/gstack-global-discover
+.claude/skills/gstack/browse/dist/
+.claude/skills/gstack/design/dist/
