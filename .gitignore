@@ -41,6 +41,10 @@ coverage/
 # Turbo
 .turbo/
 
+# VaultMesh
+data/
+drizzle/
+
 # gstack compiled binaries
 .claude/skills/gstack/bin/gstack-global-discover
 .claude/skills/gstack/browse/dist/
