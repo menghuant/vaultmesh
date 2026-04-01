@@ -1,28 +1,43 @@
-import { mkdir, writeFile, readFile, unlink, stat, access } from 'node:fs/promises'
+import { mkdir, writeFile, readFile, unlink, stat } from 'node:fs/promises'
 import { join, dirname } from 'node:path'
-import { existsSync } from 'node:fs'
-import { sha256, log } from '@vaultmesh/shared'
+import { sha256, log, AppError, ErrorCode } from '@vaultmesh/shared'
 
 const STORAGE_PATH = process.env.VAULTMESH_STORAGE_PATH || './data'
 
 function tenantFilePath(tenantId: string, filePath: string): string {
-  // Prevent path traversal
-  const normalized = filePath.replace(/\.\./g, '').replace(/\/+/g, '/')
-  return join(STORAGE_PATH, tenantId, 'files', normalized)
+  const tenantDir = join(STORAGE_PATH, tenantId, 'files')
+  const resolved = join(tenantDir, filePath)
+  if (!resolved.startsWith(tenantDir + '/') && resolved !== tenantDir) {
+    throw new Error(`Path traversal blocked: ${filePath}`)
+  }
+  return resolved
 }
 
 function tenantVersionPath(tenantId: string, contentHash: string): string {
+  if (!/^[a-f0-9]{64}$/.test(contentHash)) {
+    throw new Error(`Invalid content hash: ${contentHash}`)
+  }
   return join(STORAGE_PATH, tenantId, '.versions', contentHash)
 }
 
 export async function storeFile(tenantId: string, filePath: string, content: Buffer): Promise<string> {
   const contentHash = sha256(content)
 
+  // #24: Check disk space before writing
+  const hasSpace = await checkDiskSpace()
+  if (!hasSpace) {
+    throw new AppError(ErrorCode.STORAGE_ERROR, 'Insufficient disk space', 507)
+  }
+
   // Store content-addressable version
+  // #16: Use wx flag (exclusive create) instead of existsSync
   const versionPath = tenantVersionPath(tenantId, contentHash)
   await mkdir(dirname(versionPath), { recursive: true })
-  if (!existsSync(versionPath)) {
-    await writeFile(versionPath, content)
+  try {
+    await writeFile(versionPath, content, { flag: 'wx' })
+  } catch (err: any) {
+    if (err.code !== 'EEXIST') throw err
+    // Already exists (content-addressable dedup), fine
   }
 
   // Store current file
@@ -54,6 +69,17 @@ export async function deleteStoredFile(tenantId: string, filePath: string): Prom
   }
 }
 
+// #15: Delete version blob from disk (after DB version record is removed)
+export async function deleteVersionBlob(tenantId: string, contentHash: string): Promise<void> {
+  const versionPath = tenantVersionPath(tenantId, contentHash)
+  try {
+    await unlink(versionPath)
+    log('debug', 'storage', 'version-blob-deleted', { tenantId, contentHash })
+  } catch (err: any) {
+    if (err.code !== 'ENOENT') throw err
+  }
+}
+
 export async function getStoredFileSize(tenantId: string, filePath: string): Promise<number | null> {
   const fullPath = tenantFilePath(tenantId, filePath)
   try {
@@ -70,7 +96,6 @@ export async function ensureStorageDir(tenantId: string): Promise<void> {
 }
 
 export async function checkDiskSpace(): Promise<boolean> {
-  // Basic check: try to write a small file
   try {
     const testPath = join(STORAGE_PATH, '.disk-check')
     await mkdir(STORAGE_PATH, { recursive: true })
