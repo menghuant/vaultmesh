@@ -1,0 +1,41 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: vaultmesh
+      POSTGRES_PASSWORD: vaultmesh
+      POSTGRES_DB: vaultmesh
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vaultmesh"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build: .
+    ports:
+      - "4000:4000"
+    environment:
+      VAULTMESH_DB_URL: postgresql://vaultmesh:vaultmesh@db:5432/vaultmesh
+      VAULTMESH_JWT_SECRET: ${VAULTMESH_JWT_SECRET:-change-me-in-production}
+      VAULTMESH_STORAGE_PATH: /data
+      VAULTMESH_PORT: "4000"
+      VAULTMESH_SERVER_URL: ${VAULTMESH_SERVER_URL:-http://localhost:4000}
+    volumes:
+      - filedata:/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  pgdata:
+  filedata:
