@@ -1,0 +1,12 @@
+node_modules
+dist
+.git
+.claude
+.env
+.env.local
+data
+drizzle
+coverage
+docs
+*.md
+!README.md
