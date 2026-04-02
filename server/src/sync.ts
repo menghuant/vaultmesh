@@ -454,11 +454,22 @@ export async function restoreFileVersion(
   }
 
   const targetVersion = versions[versionNumber - 1]!
-  // Read the content from the version's stored blob
-  const content = await readStoredFile(tenantId, normalizedPath)
+  // Read content from the version's stored blob (not the current file)
+  const { readVersion } = await import('./storage.js')
+  const content = await readVersion(tenantId, targetVersion.contentHash)
 
-  // Re-upload as a new version
-  return uploadFile(db, tenantId, userId, normalizedPath, content, '')
+  // Get current server hash for proper conflict detection on re-upload
+  const [currentFile] = await db.select()
+    .from(fileMetadata)
+    .where(and(
+      eq(fileMetadata.tenantId, tenantId),
+      eq(fileMetadata.filePath, normalizedPath),
+      eq(fileMetadata.isDeleted, false),
+    ))
+    .limit(1)
+
+  const baseHash = currentFile?.contentHash || ''
+  return uploadFile(db, tenantId, userId, normalizedPath, content, baseHash)
 }
 
 // #13: Cleanup expired soft-deleted files + disk

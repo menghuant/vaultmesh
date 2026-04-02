@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, unlink, readdir, stat } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, unlink, readdir, stat, rename } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -98,7 +98,6 @@ export async function rotateLogsIfNeeded(): Promise<void> {
     if (logStat.size >= MAX_LOG_SIZE_BYTES) {
       const ts = new Date().toISOString().replace(/[:.]/g, '-')
       const rotatedPath = join(logDir, `daemon-${ts}.jsonl`)
-      const { rename } = await import('node:fs/promises')
       await rename(currentLog, rotatedPath)
     }
   } catch {

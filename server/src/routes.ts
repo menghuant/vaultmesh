@@ -4,7 +4,8 @@ import { authMiddleware, adminMiddleware } from './middleware.js'
 import * as auth from './auth.js'
 import * as sync from './sync.js'
 import * as permissions from './permissions.js'
-import { AppError, ErrorCode, type ManifestRequest } from '@vaultmesh/shared'
+import { AppError, ErrorCode, groups as groupsTable, groupMembers as gmTable, users as usersTable, type ManifestRequest } from '@vaultmesh/shared'
+import { eq as eqImport } from 'drizzle-orm'
 
 const app = new Hono()
 
@@ -150,6 +151,27 @@ api.post('/sync/manifest', async (c) => {
   return c.json(plan)
 })
 
+// ── File History Routes (must be before generic /files/* catch-all) ──
+
+api.get('/files/*/versions', async (c) => {
+  const user = c.get('user')
+  const filePath = decodeFilePath(c.req.path.replace('/api/files/', '').replace('/versions', ''))
+  const versions = await sync.getFileVersions(db, user.tenant_id, user.sub, filePath)
+  return c.json(versions)
+})
+
+api.post('/files/*/restore', async (c) => {
+  const user = c.get('user')
+  const filePath = decodeFilePath(c.req.path.replace('/api/files/', '').replace('/restore', ''))
+  const body = await c.req.json()
+  const version = typeof body.version === 'number' ? body.version : parseInt(body.version, 10)
+  if (isNaN(version) || version < 1) {
+    throw new AppError(ErrorCode.AUTH_FAILED, 'version must be a positive integer', 400)
+  }
+  const result = await sync.restoreFileVersion(db, user.tenant_id, user.sub, filePath, version)
+  return c.json(result)
+})
+
 // ── File Routes ──────────────────────────────────────────
 
 api.put('/files/*', async (c) => {
@@ -184,27 +206,6 @@ api.delete('/files/*', async (c) => {
   const filePath = decodeFilePath(c.req.path.replace('/api/files/', ''))
   await sync.softDeleteFile(db, user.tenant_id, user.sub, filePath)
   return c.json({ ok: true })
-})
-
-// ── File History Routes ──────────────────────────────────
-
-api.get('/files/*/versions', async (c) => {
-  const user = c.get('user')
-  const filePath = decodeFilePath(c.req.path.replace('/api/files/', '').replace('/versions', ''))
-  const versions = await sync.getFileVersions(db, user.tenant_id, user.sub, filePath)
-  return c.json(versions)
-})
-
-api.post('/files/*/restore', async (c) => {
-  const user = c.get('user')
-  const filePath = decodeFilePath(c.req.path.replace('/api/files/', '').replace('/restore', ''))
-  const body = await c.req.json()
-  const version = typeof body.version === 'number' ? body.version : parseInt(body.version, 10)
-  if (isNaN(version) || version < 1) {
-    throw new AppError(ErrorCode.AUTH_FAILED, 'version must be a positive integer', 400)
-  }
-  const result = await sync.restoreFileVersion(db, user.tenant_id, user.sub, filePath, version)
-  return c.json(result)
 })
 
 // ── Permission Routes ────────────────────────────────────
@@ -252,27 +253,35 @@ admin.get('/conflicts', async (c) => {
 
 admin.get('/groups', async (c) => {
   const user = c.get('user')
-  const { groups: groupsTable, groupMembers: gmTable, users: usersTable } = await import('@vaultmesh/shared')
-  const { eq } = await import('drizzle-orm')
   const allGroups = await db.select({ id: groupsTable.id, name: groupsTable.name, createdAt: groupsTable.createdAt })
     .from(groupsTable)
-    .where(eq(groupsTable.tenantId, user.tenant_id))
+    .where(eqImport(groupsTable.tenantId, user.tenant_id))
 
-  const result = []
-  for (const g of allGroups) {
-    const members = await db.select({ userId: gmTable.userId, email: usersTable.email })
-      .from(gmTable)
-      .innerJoin(usersTable, eq(usersTable.id, gmTable.userId))
-      .where(eq(gmTable.groupId, g.id))
-    result.push({ ...g, members: members.map(m => ({ userId: m.userId, email: m.email })) })
+  // Batch fetch all members for all groups to avoid N+1
+  const groupIds = allGroups.map(g => g.id)
+  const allMembers = groupIds.length > 0
+    ? await db.select({ groupId: gmTable.groupId, userId: gmTable.userId, email: usersTable.email })
+        .from(gmTable)
+        .innerJoin(usersTable, eqImport(usersTable.id, gmTable.userId))
+    : []
+
+  // Group members by groupId in memory
+  const membersByGroup = new Map<string, { userId: string; email: string }[]>()
+  for (const m of allMembers) {
+    if (!groupIds.includes(m.groupId)) continue
+    if (!membersByGroup.has(m.groupId)) membersByGroup.set(m.groupId, [])
+    membersByGroup.get(m.groupId)!.push({ userId: m.userId, email: m.email })
   }
+
+  const result = allGroups.map(g => ({
+    ...g,
+    members: membersByGroup.get(g.id) || [],
+  }))
   return c.json(result)
 })
 
 admin.get('/members', async (c) => {
   const user = c.get('user')
-  const { users: usersTable } = await import('@vaultmesh/shared')
-  const { eq } = await import('drizzle-orm')
   const members = await db.select({
     id: usersTable.id,
     email: usersTable.email,
@@ -282,7 +291,7 @@ admin.get('/members', async (c) => {
     createdAt: usersTable.createdAt,
   })
     .from(usersTable)
-    .where(eq(usersTable.tenantId, user.tenant_id))
+    .where(eqImport(usersTable.tenantId, user.tenant_id))
   return c.json(members)
 })
 

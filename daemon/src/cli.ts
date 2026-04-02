@@ -812,7 +812,8 @@ async function isDaemonRunning(): Promise<boolean> {
 }
 
 /** Write PID file with O_EXCL to prevent TOCTOU race */
-async function writePidFile(): Promise<boolean> {
+async function writePidFile(depth = 0): Promise<boolean> {
+  if (depth > 1) return false // Prevent unbounded recursion
   try {
     const fh = await open(getPidPath(), 'wx') // O_CREAT | O_EXCL | O_WRONLY
     await fh.writeFile(String(process.pid))
@@ -822,9 +823,9 @@ async function writePidFile(): Promise<boolean> {
     if (err && typeof err === 'object' && 'code' in err && err.code === 'EEXIST') {
       // PID file exists, check if the process is actually running
       if (await isDaemonRunning()) return false
-      // Stale PID file, remove and retry
+      // Stale PID file, remove and retry once
       try { await unlink(getPidPath()) } catch {}
-      return writePidFile()
+      return writePidFile(depth + 1)
     }
     throw err
   }
