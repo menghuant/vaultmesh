@@ -1,8 +1,7 @@
 import { watch, type FSWatcher } from 'chokidar'
 import { readFile, writeFile, unlink, stat, mkdir } from 'node:fs/promises'
 import { join, dirname, resolve } from 'node:path'
-import { sha256, log, MAX_FILE_SIZE, type ManifestEntry } from '@vaultmesh/shared'
-import type { RealTransport } from './transport.js'
+import { sha256, log, MAX_FILE_SIZE, type ManifestEntry, type SyncTransport } from '@vaultmesh/shared'
 import type { DaemonConfig } from './config.js'
 import { loadIgnoreFilter, getRelativePath, type IgnoreFilter } from './ignore.js'
 import { saveSyncState } from './config.js'
@@ -22,7 +21,7 @@ export class VaultDaemon {
 
   constructor(
     private config: DaemonConfig,
-    private transport: RealTransport,
+    private transport: SyncTransport,
   ) {}
 
   /** Resolve a relative path safely within the vault. Throws on traversal. */
@@ -201,7 +200,7 @@ export class VaultDaemon {
         // Record hash only after successful write
         this.knownHashes.set(item.path, sha256(content))
         // Remove after a short delay to ensure watcher event is caught
-        setTimeout(() => this.pendingWrites.delete(item.path), 500)
+        setTimeout(() => this.pendingWrites.delete(item.path), 2000)
 
         log('debug', 'daemon', 'file-downloaded', { path: item.path, sizeBytes: content.length })
       } catch (err) {
@@ -355,7 +354,7 @@ export class VaultDaemon {
     await writeFile(fullPath, content)
     // Update known hash to the downloaded version
     this.knownHashes.set(path, sha256(content))
-    setTimeout(() => this.pendingWrites.delete(path), 500)
+    setTimeout(() => this.pendingWrites.delete(path), 2000)
   }
 
   private async handleConflict(path: string, serverHash: string, localHash: string): Promise<void> {
@@ -384,7 +383,7 @@ export class VaultDaemon {
       await writeFile(fullPath, serverContent)
       // Update known hash to server version to prevent re-conflict on next edit
       this.knownHashes.set(path, sha256(serverContent))
-      setTimeout(() => this.pendingWrites.delete(path), 500)
+      setTimeout(() => this.pendingWrites.delete(path), 2000)
     } catch (err) {
       log('error', 'daemon', 'conflict-download-failed', { path, error: String(err) })
     }
@@ -403,7 +402,7 @@ export class VaultDaemon {
         this.pendingWrites.add(path)
         await unlink(fullPath)
         this.knownHashes.delete(path)
-        setTimeout(() => this.pendingWrites.delete(path), 500)
+        setTimeout(() => this.pendingWrites.delete(path), 2000)
         log('info', 'daemon', 'file-deleted-local', { path })
       } else {
         // Local file was modified after server delete, treat as conflict

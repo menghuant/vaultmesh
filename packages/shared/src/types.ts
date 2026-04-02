@@ -32,14 +32,25 @@ export interface ConflictEvent {
 }
 
 export interface SyncTransport {
+  // HTTP file operations
   uploadFile(path: string, content: Buffer, baseHash: string): Promise<UploadResult>
   downloadFile(path: string): Promise<Buffer>
   deleteFile(path: string): Promise<void>
   sendManifest(manifest: ManifestEntry[]): Promise<SyncPlan>
+  // Event callbacks
   onRemoteChange(cb: (change: RemoteChange) => void): void
   onConflict(cb: (conflict: ConflictEvent) => void): void
   onPermissionRevoked(cb: (paths: string[]) => void): void
   onPermissionGranted(cb: (paths: string[]) => void): void
+  onRemoteDelete(cb: (path: string, deletedBy: string) => void): void
+  onRemoteRename(cb: (oldPath: string, newPath: string) => void): void
+  // Notifications (WS outbound)
+  notifyFileChanged(path: string, hash: string, sizeBytes: number): void
+  notifyFileDeleted(path: string): void
+  // Lifecycle
+  connect(): Promise<void>
+  disconnect(): void
+  isConnected(): boolean
 }
 
 // ── WebSocket Message Types ──────────────────────────────

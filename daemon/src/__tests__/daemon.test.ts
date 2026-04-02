@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { sha256 } from '@vaultmesh/shared'
 import { VaultDaemon } from '../daemon.js'
-import type { RealTransport } from '../transport.js'
+import type { SyncTransport } from '@vaultmesh/shared'
 import type { DaemonConfig } from '../config.js'
 
 function makeConfig(vaultPath: string): DaemonConfig {
@@ -19,7 +19,7 @@ function makeConfig(vaultPath: string): DaemonConfig {
   }
 }
 
-function makeMockTransport(): RealTransport {
+function makeMockTransport(): SyncTransport {
   return {
     connect: async () => {},
     disconnect: () => {},
@@ -36,7 +36,7 @@ function makeMockTransport(): RealTransport {
     onPermissionGranted: () => {},
     onRemoteDelete: () => {},
     onRemoteRename: () => {},
-  } as unknown as RealTransport
+  }
 }
 
 describe('VaultDaemon', () => {
@@ -205,7 +205,7 @@ describe('VaultDaemon', () => {
       mockTransport.downloadFile = async () => serverContent
 
       const config = makeConfig(vaultPath)
-      const daemon = new VaultDaemon(config, mockTransport as unknown as RealTransport)
+      const daemon = new VaultDaemon(config, mockTransport as SyncTransport)
 
       // Mock getConflictsDir to use our test dir
       const originalImport = (daemon as any).handleConflict
