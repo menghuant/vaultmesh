@@ -1,5 +1,5 @@
 import { Command } from 'commander'
-import { readFile, writeFile, unlink, readdir } from 'node:fs/promises'
+import { readFile, writeFile, unlink, readdir, open } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { decodeInviteToken, log, setLogLevel } from '@vaultmesh/shared'
@@ -32,6 +32,10 @@ function validateServerUrl(url: string): string {
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
       error(`Server URL must use http:// or https:// (got ${parsed.protocol})`)
       process.exit(1)
+    }
+    // TLS enforcement warning (except localhost)
+    if (parsed.protocol === 'http:' && parsed.hostname !== 'localhost' && parsed.hostname !== '127.0.0.1') {
+      warn(`Server URL is not using HTTPS. Your credentials will be sent in plain text.`)
     }
     return parsed.origin
   } catch {
@@ -539,14 +543,12 @@ daemonCmd
 
     if (opts.debug) setLogLevel('debug')
 
-    // Check if already running
-    if (await isDaemonRunning()) {
+    // Write PID file (O_EXCL prevents TOCTOU race)
+    const acquired = await writePidFile()
+    if (!acquired) {
       warn('Daemon is already running.')
       return
     }
-
-    // Write PID file
-    await writeFile(getPidPath(), String(process.pid))
 
     success('Starting sync daemon...')
 
@@ -641,10 +643,37 @@ async function isDaemonRunning(): Promise<boolean> {
   }
 }
 
+/** Write PID file with O_EXCL to prevent TOCTOU race */
+async function writePidFile(): Promise<boolean> {
+  try {
+    const fh = await open(getPidPath(), 'wx') // O_CREAT | O_EXCL | O_WRONLY
+    await fh.writeFile(String(process.pid))
+    await fh.close()
+    return true
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'code' in err && err.code === 'EEXIST') {
+      // PID file exists, check if the process is actually running
+      if (await isDaemonRunning()) return false
+      // Stale PID file, remove and retry
+      try { await unlink(getPidPath()) } catch {}
+      return writePidFile()
+    }
+    throw err
+  }
+}
+
 async function stopDaemonProcess(): Promise<void> {
   try {
     const pid = parseInt(await readFile(getPidPath(), 'utf-8'), 10)
     if (!isNaN(pid)) {
+      // Verify the PID is actually a vaultmesh process before killing
+      try {
+        process.kill(pid, 0) // Check process exists
+      } catch {
+        // Process doesn't exist, just clean up PID file
+        try { await unlink(getPidPath()) } catch {}
+        return
+      }
       process.kill(pid, 'SIGTERM')
       // Wait up to 5s for process to exit
       for (let i = 0; i < 50; i++) {

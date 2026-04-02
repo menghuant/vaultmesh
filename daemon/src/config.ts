@@ -80,5 +80,5 @@ export async function loadSyncState(): Promise<SyncState> {
 }
 
 export async function saveSyncState(state: SyncState): Promise<void> {
-  await writeFile(getStatePath(), JSON.stringify(state))
+  await writeFile(getStatePath(), JSON.stringify(state), { mode: 0o600 })
 }

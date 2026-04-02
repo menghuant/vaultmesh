@@ -22,6 +22,9 @@ export interface WSData {
 
 // ── ConnectionManager ───────────────────────────────────
 
+const MAX_CONNECTIONS_PER_TENANT = 100
+const MAX_TOTAL_CONNECTIONS = 1000
+
 class ConnectionManager {
   // tenantId -> Set<connectionId>
   private tenants = new Map<string, Set<string>>()
@@ -39,7 +42,19 @@ class ConnectionManager {
     return `ws_${++this.nextId}_${Date.now()}`
   }
 
-  add(ws: ServerWebSocket<WSData>, payload: JWTPayload): void {
+  /** Returns false if connection limits are exceeded */
+  add(ws: ServerWebSocket<WSData>, payload: JWTPayload): boolean {
+    // Enforce connection limits
+    if (this.connections.size >= MAX_TOTAL_CONNECTIONS) {
+      log('warn', 'ws', 'max-total-connections-reached', { current: this.connections.size })
+      return false
+    }
+    const tenantCount = this.getTenantConnectionCount(payload.tenant_id)
+    if (tenantCount >= MAX_CONNECTIONS_PER_TENANT) {
+      log('warn', 'ws', 'max-tenant-connections-reached', { tenantId: payload.tenant_id, current: tenantCount })
+      return false
+    }
+
     const connId = ws.data.connectionId
     const conn: WSConnection = {
       ws,
@@ -66,6 +81,7 @@ class ConnectionManager {
       userId: payload.sub,
       tenantId: payload.tenant_id,
     })
+    return true
   }
 
   remove(connId: string): void {
@@ -228,7 +244,12 @@ export async function handleMessage(ws: ServerWebSocket<WSData>, raw: string | B
 
     try {
       const payload = await verifyAccessToken(msg.token)
-      connectionManager.add(ws, payload)
+      const added = connectionManager.add(ws, payload)
+      if (!added) {
+        ws.send(JSON.stringify({ type: 'auth-failed', reason: 'Connection limit exceeded' }))
+        ws.close(4003, 'connection limit')
+        return
+      }
       clearAuthTimeout(connId)
       ws.send(JSON.stringify({ type: 'auth-ok', userId: payload.sub }))
     } catch {
