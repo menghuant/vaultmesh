@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "type": "module",
   "main": "src/index.ts",
+  "bin": {
+    "vaultmesh": "src/index.ts"
+  },
   "scripts": {
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
@@ -10,7 +13,9 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@vaultmesh/shared": "workspace:*"
+    "@vaultmesh/shared": "workspace:*",
+    "chokidar": "^5.0.0",
+    "commander": "^14.0.3"
   },
   "devDependencies": {
     "typescript": "^5.7.0",
