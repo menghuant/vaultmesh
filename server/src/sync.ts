@@ -10,7 +10,7 @@ import {
   log,
 } from '@vaultmesh/shared'
 import type { Database } from './db.js'
-import { storeFile, readStoredFile, deleteVersionBlob } from './storage.js'
+import { storeFile, readStoredFile, deleteStoredFile, deleteVersionBlob } from './storage.js'
 import { resolvePermission, canRead, canWrite } from './permissions.js'
 
 // ── Permission Pre-fetch (#11: fix N+1) ──────────────────
@@ -203,6 +203,11 @@ export async function uploadFile(
       ))
       .limit(1)
 
+    // Updating an existing file requires base_hash for conflict detection
+    if (serverFile && !baseHash) {
+      throw new AppError(ErrorCode.CONFLICT, 'X-Base-Hash header required when updating existing file', 400)
+    }
+
     if (serverFile && baseHash && serverFile.contentHash !== baseHash) {
       await tx.insert(conflictLog).values({
         id: generateId(),
@@ -270,11 +275,17 @@ export async function uploadFile(
 
     if (versions.length > MAX_FILE_VERSIONS) {
       const toDelete = versions.slice(0, versions.length - MAX_FILE_VERSIONS)
-      const keepHashes = new Set(versions.slice(versions.length - MAX_FILE_VERSIONS).map(v => v.contentHash))
       for (const v of toDelete) {
         await tx.delete(fileVersions).where(eq(fileVersions.id, v.id))
-        // Only delete blob if no other version references this hash
-        if (!keepHashes.has(v.contentHash)) {
+        // Only delete blob if no other version in the entire tenant references this hash
+        const [otherRef] = await tx.select({ id: fileVersions.id })
+          .from(fileVersions)
+          .where(and(
+            eq(fileVersions.tenantId, tenantId),
+            eq(fileVersions.contentHash, v.contentHash),
+          ))
+          .limit(1)
+        if (!otherRef) {
           await deleteVersionBlob(tenantId, v.contentHash).catch(() => {})
         }
       }
@@ -383,10 +394,15 @@ export async function getConflictStats(
   }
 }
 
-// #13: Cleanup expired soft-deleted files
+// #13: Cleanup expired soft-deleted files + disk
 export async function cleanupSoftDeletes(db: Database): Promise<number> {
   const cutoff = new Date(Date.now() - SOFT_DELETE_RETENTION_DAYS * 24 * 60 * 60 * 1000)
-  const expired = await db.select({ id: fileMetadata.id })
+  const expired = await db.select({
+    id: fileMetadata.id,
+    tenantId: fileMetadata.tenantId,
+    filePath: fileMetadata.filePath,
+    contentHash: fileMetadata.contentHash,
+  })
     .from(fileMetadata)
     .where(and(
       eq(fileMetadata.isDeleted, true),
@@ -394,6 +410,37 @@ export async function cleanupSoftDeletes(db: Database): Promise<number> {
     ))
 
   for (const row of expired) {
+    // Delete disk file
+    await deleteStoredFile(row.tenantId, row.filePath).catch(() => {})
+
+    // Delete version blobs if no other reference in the tenant
+    const versions = await db.select({ contentHash: fileVersions.contentHash })
+      .from(fileVersions)
+      .where(and(
+        eq(fileVersions.tenantId, row.tenantId),
+        eq(fileVersions.filePath, row.filePath),
+      ))
+
+    for (const v of versions) {
+      await db.delete(fileVersions).where(and(
+        eq(fileVersions.tenantId, row.tenantId),
+        eq(fileVersions.filePath, row.filePath),
+        eq(fileVersions.contentHash, v.contentHash),
+      ))
+      // Only delete blob if no other version in tenant references it
+      const [otherRef] = await db.select({ id: fileVersions.id })
+        .from(fileVersions)
+        .where(and(
+          eq(fileVersions.tenantId, row.tenantId),
+          eq(fileVersions.contentHash, v.contentHash),
+        ))
+        .limit(1)
+      if (!otherRef) {
+        await deleteVersionBlob(row.tenantId, v.contentHash).catch(() => {})
+      }
+    }
+
+    // Delete metadata row
     await db.delete(fileMetadata).where(eq(fileMetadata.id, row.id))
   }
 

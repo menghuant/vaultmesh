@@ -110,7 +110,8 @@ app.post('/api/auth/login', async (c) => {
   const body = await c.req.json()
   const email = requireString(body, 'email')
   const password = requireString(body, 'password')
-  const result = await auth.login(db, { email, password })
+  const tenantId = requireString(body, 'tenantId')
+  const result = await auth.login(db, { email, password, tenantId })
   return c.json(result)
 })
 

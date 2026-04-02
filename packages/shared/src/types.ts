@@ -82,6 +82,7 @@ export interface SignupResponse {
 export interface LoginRequest {
   email: string
   password: string
+  tenantId: string
 }
 
 export interface LoginResponse {

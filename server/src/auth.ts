@@ -16,8 +16,9 @@ import {
 import type { Database } from './db.js'
 
 // #1: Refuse to start with default JWT secret
+const KNOWN_DEFAULTS = ['dev-secret-change-in-production', 'change-me-in-production']
 const jwtSecretRaw = process.env.VAULTMESH_JWT_SECRET
-if (!jwtSecretRaw || jwtSecretRaw === 'dev-secret-change-in-production') {
+if (!jwtSecretRaw || KNOWN_DEFAULTS.includes(jwtSecretRaw)) {
   if (process.env.NODE_ENV === 'production') {
     throw new Error('VAULTMESH_JWT_SECRET must be set in production. Generate one: openssl rand -base64 32')
   }
@@ -154,7 +155,9 @@ export async function signup(db: Database, req: SignupRequest): Promise<SignupRe
 }
 
 export async function login(db: Database, req: LoginRequest): Promise<LoginResponse> {
-  const [user] = await db.select().from(users).where(eq(users.email, req.email)).limit(1)
+  const [user] = await db.select().from(users)
+    .where(and(eq(users.tenantId, req.tenantId), eq(users.email, req.email)))
+    .limit(1)
   if (!user || !user.passwordHash) {
     throw new AppError(ErrorCode.AUTH_FAILED, 'Invalid email or password', 401)
   }
@@ -276,9 +279,14 @@ export async function redeem(db: Database, req: RedeemRequest): Promise<RedeemRe
     }
 
     // Mark invite as redeemed first (prevents concurrent redeem)
-    await tx.update(inviteTokens)
+    const updated = await tx.update(inviteTokens)
       .set({ redeemedAt: new Date() })
       .where(and(eq(inviteTokens.id, invite.id), eq(inviteTokens.redeemedAt, null as any)))
+      .returning({ id: inviteTokens.id })
+
+    if (updated.length === 0) {
+      throw new AppError(ErrorCode.INVITE_ALREADY_REDEEMED, 'Invite already used', 400)
+    }
 
     const [user] = await tx.select().from(users)
       .where(and(eq(users.tenantId, invite.tenantId), eq(users.email, invite.email)))
