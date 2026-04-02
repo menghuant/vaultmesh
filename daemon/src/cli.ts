@@ -380,6 +380,33 @@ groups
   })
 
 groups
+  .command('list')
+  .description('List all groups and members')
+  .action(async () => {
+    const config = await requireConfig()
+    const res = await apiRequest(config, '/api/admin/groups')
+    if (!res.ok) {
+      error('Failed to list groups')
+      process.exit(1)
+    }
+    const data = await res.json() as { id: string; name: string; members: { email: string }[] }[]
+    if (data.length === 0) {
+      console.log(dim('No groups found.'))
+      return
+    }
+    for (const g of data) {
+      console.log(`${bold(g.name)}  ${dim(g.id)}`)
+      if (g.members.length === 0) {
+        console.log(`  ${dim('(no members)')}`)
+      } else {
+        for (const m of g.members) {
+          console.log(`  ${m.email}`)
+        }
+      }
+    }
+  })
+
+groups
   .command('remove <groupId> <email>')
   .description('Remove a user from a group')
   .action(async (groupId: string, email: string) => {
@@ -397,6 +424,31 @@ groups
     }
 
     success(`${email} removed from group.`)
+  })
+
+// ── admin members ──────────────────────────────────────
+
+admin
+  .command('members')
+  .description('List all tenant members')
+  .action(async () => {
+    const config = await requireConfig()
+    const res = await apiRequest(config, '/api/admin/members')
+    if (!res.ok) {
+      error('Failed to list members')
+      process.exit(1)
+    }
+    const data = await res.json() as { id: string; email: string; displayName: string | null; role: string; status: string }[]
+    if (data.length === 0) {
+      console.log(dim('No members found.'))
+      return
+    }
+    console.log(bold('Members:'))
+    for (const m of data) {
+      const name = m.displayName ? ` (${m.displayName})` : ''
+      const statusBadge = m.status === 'active' ? green('●') : yellow('○')
+      console.log(`  ${statusBadge} ${m.email}${name}  ${dim(m.role)}  ${dim(m.id.slice(0, 8))}`)
+    }
   })
 
 // ── admin permissions ───────────────────────────────────
@@ -489,6 +541,63 @@ conflicts
   })
 
 conflicts
+  .command('diff <file>')
+  .description('Show diff between your version and server version')
+  .action(async (file: string) => {
+    const config = await requireConfig()
+    const conflictsDir = getConflictsDir()
+
+    try {
+      const files = await readdir(conflictsDir)
+      const match = files.find(f => f.includes('.CONFLICT-') && f.includes(file.replace(/\//g, '__')))
+
+      if (!match) {
+        error(`No conflict found matching "${file}"`)
+        process.exit(1)
+      }
+
+      // Parse original path from conflict filename
+      const originalPath = match.replace(/\.CONFLICT-.+$/, '').replace(/__/g, '/')
+      const conflictContent = await readFile(join(conflictsDir, match), 'utf-8')
+
+      let serverContent: string
+      try {
+        serverContent = await readFile(join(config.vaultPath, originalPath), 'utf-8')
+      } catch {
+        console.log(yellow('Server version not found locally. Showing your version only:'))
+        console.log(conflictContent)
+        return
+      }
+
+      // Simple line-by-line diff
+      const yourLines = conflictContent.split('\n')
+      const serverLines = serverContent.split('\n')
+      const maxLines = Math.max(yourLines.length, serverLines.length)
+
+      console.log(bold(`--- yours (conflict copy)`))
+      console.log(bold(`+++ theirs (server version)`))
+      console.log()
+
+      for (let i = 0; i < maxLines; i++) {
+        const yours = yourLines[i]
+        const theirs = serverLines[i]
+        if (yours === theirs) continue
+        if (yours !== undefined && theirs === undefined) {
+          console.log(red(`- ${yours}`))
+        } else if (yours === undefined && theirs !== undefined) {
+          console.log(green(`+ ${theirs}`))
+        } else {
+          console.log(red(`- ${yours}`))
+          console.log(green(`+ ${theirs}`))
+        }
+      }
+    } catch {
+      error(`No conflicts directory found.`)
+      process.exit(1)
+    }
+  })
+
+conflicts
   .command('resolve <file>')
   .description('Resolve a conflict')
   .requiredOption('--keep <strategy>', 'ours or theirs')
@@ -503,7 +612,10 @@ conflicts
 
     try {
       const files = await readdir(conflictsDir)
-      const match = files.find(f => f.includes(file) && f.includes('.CONFLICT-'))
+      // Match by exact path prefix (convert slashes to __ for conflict filename format)
+      const searchKey = file.replace(/\//g, '__')
+      const match = files.find(f => f.includes('.CONFLICT-') && f.startsWith(searchKey))
+        || files.find(f => f.includes('.CONFLICT-') && f.includes(searchKey))
 
       if (!match) {
         error(`No conflict found matching "${file}"`)
@@ -528,6 +640,62 @@ conflicts
       error(`Failed to resolve conflict: ${err}`)
       process.exit(1)
     }
+  })
+
+// ── history ────────────────────────────────────────────
+
+program
+  .command('history <file>')
+  .description('Show version history for a file')
+  .action(async (file: string) => {
+    const config = await requireConfig()
+    const res = await apiRequest(config, `/api/files/${encodeURIComponent(file)}/versions`)
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as { message?: string }
+      error((body as { message?: string }).message || `Failed to get history for ${file}`)
+      process.exit(1)
+    }
+    const versions = await res.json() as { version: number; contentHash: string; sizeBytes: number; authorId: string | null; createdAt: string }[]
+    if (versions.length === 0) {
+      console.log(dim('No version history found.'))
+      return
+    }
+    console.log(bold(`Version history: ${file}`))
+    for (const v of versions.reverse()) {
+      const date = new Date(v.createdAt).toLocaleString()
+      const size = v.sizeBytes < 1024 ? `${v.sizeBytes}B` : `${Math.round(v.sizeBytes / 1024)}KB`
+      console.log(`  v${v.version}  ${dim(date)}  ${dim(size)}  ${dim(v.contentHash.slice(0, 8))}`)
+    }
+    console.log(dim(`\nRestore: vaultmesh restore ${file} <version>`))
+  })
+
+// ── restore ────────────────────────────────────────────
+
+program
+  .command('restore <file> <version>')
+  .description('Restore a file to a previous version')
+  .action(async (file: string, version: string) => {
+    const config = await requireConfig()
+    const versionNum = parseInt(version, 10)
+    if (isNaN(versionNum) || versionNum < 1) {
+      error('Version must be a positive integer')
+      process.exit(1)
+    }
+
+    const res = await apiRequest(config, `/api/files/${encodeURIComponent(file)}/restore`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version: versionNum }),
+    })
+
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as { message?: string }
+      error((body as { message?: string }).message || `Failed to restore ${file}`)
+      process.exit(1)
+    }
+
+    const data = await res.json() as { version: number }
+    success(`Restored ${file} to v${versionNum} (now v${data.version})`)
   })
 
 // ── daemon commands ─────────────────────────────────────
