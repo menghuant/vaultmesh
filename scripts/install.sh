@@ -70,7 +70,7 @@ main() {
   # Verify checksum
   info "Verifying checksum..."
   local expected_checksum
-  if expected_checksum=$(curl -fsSL "${checksum_url}" 2>/dev/null); then
+  if expected_checksum=$(curl -fsSL "${checksum_url}" 2>/dev/null | awk '{print $1}'); then
     local actual_checksum
     if command -v sha256sum &>/dev/null; then
       actual_checksum=$(sha256sum "${tmp_bin}" | cut -d' ' -f1)

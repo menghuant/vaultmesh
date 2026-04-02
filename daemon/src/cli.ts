@@ -1,8 +1,8 @@
 import { Command } from 'commander'
 import { readFile, writeFile, unlink, readdir } from 'node:fs/promises'
-import { join, basename } from 'node:path'
+import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { sha256, decodeInviteToken, log, setLogLevel } from '@vaultmesh/shared'
+import { decodeInviteToken, log, setLogLevel } from '@vaultmesh/shared'
 import {
   loadConfig, saveConfig, deleteConfig, ensureConfigDir,
   getPidPath, getLogPath, getConflictsDir,
@@ -132,8 +132,6 @@ program
 
       const data = await res.json() as { accessToken: string; refreshToken: string; userId: string; tenantId: string }
 
-      // Get tenant info
-      const healthRes = await fetch(`${tokenData.serverUrl}/health`)
       const tenantName = data.tenantId.slice(0, 8) // Fallback
 
       const vaultPath = opts.path || join(homedir(), 'VaultMesh', tenantName)
@@ -557,6 +555,7 @@ daemonCmd
     const { RealTransport } = await import('./transport.js')
 
     const transport = new RealTransport(config, async () => {
+      // Called only on 401 (token expired), not on every request
       const refreshed = await refreshToken(config)
       if (!refreshed) throw new Error('Token refresh failed')
       return config.accessToken

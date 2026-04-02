@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -60,7 +60,6 @@ export async function saveConfig(config: DaemonConfig): Promise<void> {
 }
 
 export async function deleteConfig(): Promise<void> {
-  const { unlink } = await import('node:fs/promises')
   try { await unlink(CONFIG_FILE) } catch {}
 }
 

@@ -6,7 +6,7 @@ import type { RealTransport } from './transport.js'
 import type { DaemonConfig } from './config.js'
 import { loadIgnoreFilter, getRelativePath, type IgnoreFilter } from './ignore.js'
 import { saveSyncState } from './config.js'
-import { notifyFileSync, notifyConflict, notifyPermissionRevoked, notifyReconnected } from './notifications.js'
+import { notifyFileSync, notifyConflict, notifyPermissionRevoked } from './notifications.js'
 
 export class VaultDaemon {
   private watcher: FSWatcher | null = null
@@ -139,12 +139,10 @@ export class VaultDaemon {
     })
 
     // Process downloads (parallel, limited concurrency)
+    // Note: knownHashes for downloads are set inside downloadWorker on success,
+    // not here, to avoid poisoning state on failed downloads
     if (plan.download.length > 0) {
       await this.processDownloads(plan.download)
-      // Record downloaded hashes as known server state
-      for (const item of plan.download) {
-        this.knownHashes.set(item.path, item.hash)
-      }
     }
 
     // Process uploads
@@ -200,6 +198,8 @@ export class VaultDaemon {
         // Mark as pending write to suppress watcher upload
         this.pendingWrites.add(item.path)
         await writeFile(fullPath, content)
+        // Record hash only after successful write
+        this.knownHashes.set(item.path, sha256(content))
         // Remove after a short delay to ensure watcher event is caught
         setTimeout(() => this.pendingWrites.delete(item.path), 500)
 
@@ -382,6 +382,8 @@ export class VaultDaemon {
       const serverContent = await this.transport.downloadFile(path)
       this.pendingWrites.add(path)
       await writeFile(fullPath, serverContent)
+      // Update known hash to server version to prevent re-conflict on next edit
+      this.knownHashes.set(path, sha256(serverContent))
       setTimeout(() => this.pendingWrites.delete(path), 500)
     } catch (err) {
       log('error', 'daemon', 'conflict-download-failed', { path, error: String(err) })

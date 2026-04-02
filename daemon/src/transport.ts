@@ -26,32 +26,59 @@ export class RealTransport implements SyncTransport {
   private maxReconnectDelay = 30_000
   private shuttingDown = false
   private pingInterval: ReturnType<typeof setInterval> | null = null
-  private getToken: () => Promise<string>
+  private refreshToken: () => Promise<string>
+  private cachedToken: string
+  private refreshPromise: Promise<string> | null = null // Mutex for token refresh
 
   constructor(
     private config: DaemonConfig,
     tokenRefresher: () => Promise<string>,
   ) {
-    this.getToken = tokenRefresher
+    this.refreshToken = tokenRefresher
+    this.cachedToken = config.accessToken
   }
 
   // ── HTTP Methods ────────────────────────────────────────
 
+  /** Get current access token. Only refresh on 401, not on every call. */
+  private async getToken(): Promise<string> {
+    return this.cachedToken
+  }
+
+  /** Refresh the token with mutex to prevent concurrent refresh races. */
+  private async doRefresh(): Promise<string> {
+    if (this.refreshPromise) return this.refreshPromise
+    this.refreshPromise = this.refreshToken().finally(() => { this.refreshPromise = null })
+    this.cachedToken = await this.refreshPromise
+    return this.cachedToken
+  }
+
   private async authHeaders(): Promise<Record<string, string>> {
-    const token = await this.getToken()
     return {
-      'Authorization': `Bearer ${token}`,
+      'Authorization': `Bearer ${this.cachedToken}`,
     }
   }
 
+  /** Fetch with automatic 401 retry after token refresh */
+  private async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
+    const headers = { ...await this.authHeaders(), ...((init.headers as Record<string, string>) || {}) }
+    let res = await fetch(url, { ...init, headers })
+
+    if (res.status === 401) {
+      await this.doRefresh()
+      const retryHeaders = { ...await this.authHeaders(), ...((init.headers as Record<string, string>) || {}) }
+      res = await fetch(url, { ...init, headers: retryHeaders })
+    }
+
+    return res
+  }
+
   async uploadFile(path: string, content: Buffer, baseHash: string): Promise<UploadResult> {
-    const headers = await this.authHeaders()
     const url = `${this.config.serverUrl}/api/files/${encodeURIComponent(path)}`
 
-    const res = await fetch(url, {
+    const res = await this.fetchWithAuth(url, {
       method: 'PUT',
       headers: {
-        ...headers,
         'Content-Type': 'application/octet-stream',
         'X-Base-Hash': baseHash,
       },
@@ -67,10 +94,9 @@ export class RealTransport implements SyncTransport {
   }
 
   async downloadFile(path: string): Promise<Buffer> {
-    const headers = await this.authHeaders()
     const url = `${this.config.serverUrl}/api/files/${encodeURIComponent(path)}`
 
-    const res = await fetch(url, { headers })
+    const res = await this.fetchWithAuth(url)
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(`Download failed (${res.status}): ${(body as any).message || res.statusText}`)
@@ -81,10 +107,9 @@ export class RealTransport implements SyncTransport {
   }
 
   async deleteFile(path: string): Promise<void> {
-    const headers = await this.authHeaders()
     const url = `${this.config.serverUrl}/api/files/${encodeURIComponent(path)}`
 
-    const res = await fetch(url, { method: 'DELETE', headers })
+    const res = await this.fetchWithAuth(url, { method: 'DELETE' })
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(`Delete failed (${res.status}): ${(body as any).message || res.statusText}`)
@@ -92,12 +117,11 @@ export class RealTransport implements SyncTransport {
   }
 
   async sendManifest(manifest: ManifestEntry[]): Promise<SyncPlan> {
-    const headers = await this.authHeaders()
     const url = `${this.config.serverUrl}/api/sync/manifest`
 
-    const res = await fetch(url, {
+    const res = await this.fetchWithAuth(url, {
       method: 'POST',
-      headers: { ...headers, 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ files: manifest }),
     })
 
@@ -130,8 +154,7 @@ export class RealTransport implements SyncTransport {
 
         // First message: auth
         try {
-          const token = await this.getToken()
-          ws.send(JSON.stringify({ type: 'auth', token }))
+          ws.send(JSON.stringify({ type: 'auth', token: this.cachedToken }))
         } catch (err) {
           ws.close()
           reject(err)
