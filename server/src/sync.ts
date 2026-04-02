@@ -394,6 +394,73 @@ export async function getConflictStats(
   }
 }
 
+// ── File Version History ─────────────────────────────────
+
+export async function getFileVersions(
+  db: Database,
+  tenantId: string,
+  userId: string,
+  filePath: string,
+): Promise<{ version: number; contentHash: string; sizeBytes: number; authorId: string | null; createdAt: Date }[]> {
+  const normalizedPath = normalizePath(filePath)
+
+  const perm = await resolvePermission(db, tenantId, userId, normalizedPath)
+  if (!canRead(perm.role)) {
+    throw new AppError(ErrorCode.PERMISSION_DENIED, `No read permission for ${normalizedPath}`, 403)
+  }
+
+  const versions = await db.select({
+    contentHash: fileVersions.contentHash,
+    sizeBytes: fileVersions.sizeBytes,
+    authorId: fileVersions.authorId,
+    createdAt: fileVersions.createdAt,
+  })
+    .from(fileVersions)
+    .where(and(eq(fileVersions.tenantId, tenantId), eq(fileVersions.filePath, normalizedPath)))
+    .orderBy(fileVersions.createdAt)
+
+  return versions.map((v, i) => ({
+    version: i + 1,
+    contentHash: v.contentHash,
+    sizeBytes: Number(v.sizeBytes),
+    authorId: v.authorId,
+    createdAt: v.createdAt,
+  }))
+}
+
+// ── File Restore ────────────────────────────────────────
+
+export async function restoreFileVersion(
+  db: Database,
+  tenantId: string,
+  userId: string,
+  filePath: string,
+  versionNumber: number,
+): Promise<{ version: number }> {
+  const normalizedPath = normalizePath(filePath)
+
+  const perm = await resolvePermission(db, tenantId, userId, normalizedPath)
+  if (!canWrite(perm.role)) {
+    throw new AppError(ErrorCode.PERMISSION_DENIED, `No write permission for ${normalizedPath}`, 403)
+  }
+
+  const versions = await db.select()
+    .from(fileVersions)
+    .where(and(eq(fileVersions.tenantId, tenantId), eq(fileVersions.filePath, normalizedPath)))
+    .orderBy(fileVersions.createdAt)
+
+  if (versionNumber < 1 || versionNumber > versions.length) {
+    throw new AppError(ErrorCode.FILE_NOT_FOUND, `Version ${versionNumber} not found`, 404)
+  }
+
+  const targetVersion = versions[versionNumber - 1]!
+  // Read the content from the version's stored blob
+  const content = await readStoredFile(tenantId, normalizedPath)
+
+  // Re-upload as a new version
+  return uploadFile(db, tenantId, userId, normalizedPath, content, '')
+}
+
 // #13: Cleanup expired soft-deleted files + disk
 export async function cleanupSoftDeletes(db: Database): Promise<number> {
   const cutoff = new Date(Date.now() - SOFT_DELETE_RETENTION_DAYS * 24 * 60 * 60 * 1000)

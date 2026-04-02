@@ -186,6 +186,27 @@ api.delete('/files/*', async (c) => {
   return c.json({ ok: true })
 })
 
+// ── File History Routes ──────────────────────────────────
+
+api.get('/files/*/versions', async (c) => {
+  const user = c.get('user')
+  const filePath = decodeFilePath(c.req.path.replace('/api/files/', '').replace('/versions', ''))
+  const versions = await sync.getFileVersions(db, user.tenant_id, user.sub, filePath)
+  return c.json(versions)
+})
+
+api.post('/files/*/restore', async (c) => {
+  const user = c.get('user')
+  const filePath = decodeFilePath(c.req.path.replace('/api/files/', '').replace('/restore', ''))
+  const body = await c.req.json()
+  const version = typeof body.version === 'number' ? body.version : parseInt(body.version, 10)
+  if (isNaN(version) || version < 1) {
+    throw new AppError(ErrorCode.AUTH_FAILED, 'version must be a positive integer', 400)
+  }
+  const result = await sync.restoreFileVersion(db, user.tenant_id, user.sub, filePath, version)
+  return c.json(result)
+})
+
 // ── Permission Routes ────────────────────────────────────
 
 api.get('/permissions', async (c) => {
@@ -227,6 +248,42 @@ admin.get('/conflicts', async (c) => {
   const user = c.get('user')
   const stats = await sync.getConflictStats(db, user.tenant_id)
   return c.json(stats)
+})
+
+admin.get('/groups', async (c) => {
+  const user = c.get('user')
+  const { groups: groupsTable, groupMembers: gmTable, users: usersTable } = await import('@vaultmesh/shared')
+  const { eq } = await import('drizzle-orm')
+  const allGroups = await db.select({ id: groupsTable.id, name: groupsTable.name, createdAt: groupsTable.createdAt })
+    .from(groupsTable)
+    .where(eq(groupsTable.tenantId, user.tenant_id))
+
+  const result = []
+  for (const g of allGroups) {
+    const members = await db.select({ userId: gmTable.userId, email: usersTable.email })
+      .from(gmTable)
+      .innerJoin(usersTable, eq(usersTable.id, gmTable.userId))
+      .where(eq(gmTable.groupId, g.id))
+    result.push({ ...g, members: members.map(m => ({ userId: m.userId, email: m.email })) })
+  }
+  return c.json(result)
+})
+
+admin.get('/members', async (c) => {
+  const user = c.get('user')
+  const { users: usersTable } = await import('@vaultmesh/shared')
+  const { eq } = await import('drizzle-orm')
+  const members = await db.select({
+    id: usersTable.id,
+    email: usersTable.email,
+    displayName: usersTable.displayName,
+    role: usersTable.role,
+    status: usersTable.status,
+    createdAt: usersTable.createdAt,
+  })
+    .from(usersTable)
+    .where(eq(usersTable.tenantId, user.tenant_id))
+  return c.json(members)
 })
 
 admin.post('/groups', async (c) => {
