@@ -59,18 +59,47 @@ export class RealTransport implements SyncTransport {
     }
   }
 
-  /** Fetch with automatic 401 retry after token refresh */
+  private static readonly MAX_RETRIES = 3
+  private static readonly RETRY_BASE_MS = 500
+
+  /** Check if an HTTP status or error is retriable */
+  private static isRetriable(status: number): boolean {
+    return status === 502 || status === 503 || status === 504 || status === 429
+  }
+
+  /** Fetch with automatic 401 retry after token refresh + transient failure retry */
   private async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
     const headers = { ...await this.authHeaders(), ...((init.headers as Record<string, string>) || {}) }
-    let res = await fetch(url, { ...init, headers })
+    let res: Response
+    let lastError: unknown
 
-    if (res.status === 401) {
-      await this.doRefresh()
-      const retryHeaders = { ...await this.authHeaders(), ...((init.headers as Record<string, string>) || {}) }
-      res = await fetch(url, { ...init, headers: retryHeaders })
+    for (let attempt = 0; attempt <= RealTransport.MAX_RETRIES; attempt++) {
+      try {
+        res = await fetch(url, { ...init, headers })
+
+        if (res.status === 401 && attempt === 0) {
+          await this.doRefresh()
+          const retryHeaders = { ...await this.authHeaders(), ...((init.headers as Record<string, string>) || {}) }
+          res = await fetch(url, { ...init, headers: retryHeaders })
+        }
+
+        if (!RealTransport.isRetriable(res.status) || attempt === RealTransport.MAX_RETRIES) {
+          return res
+        }
+
+        log('debug', 'daemon', 'http-retry', { url, status: res.status, attempt: attempt + 1 })
+      } catch (err: unknown) {
+        lastError = err
+        if (attempt === RealTransport.MAX_RETRIES) break
+        log('debug', 'daemon', 'http-retry-network', { url, error: String(err), attempt: attempt + 1 })
+      }
+
+      // Exponential backoff with jitter
+      const delay = RealTransport.RETRY_BASE_MS * Math.pow(2, attempt) * (0.5 + Math.random())
+      await new Promise(r => setTimeout(r, delay))
     }
 
-    return res
+    throw lastError || new Error(`Request failed after ${RealTransport.MAX_RETRIES} retries`)
   }
 
   async uploadFile(path: string, content: Buffer, baseHash: string): Promise<UploadResult> {
@@ -175,8 +204,10 @@ export class RealTransport implements SyncTransport {
         reject(new Error('WebSocket closed before authentication'))
 
         if (!this.shuttingDown) {
-          log('info', 'daemon', 'ws-disconnected', { reconnectIn: this.reconnectDelay })
-          setTimeout(() => this.reconnect(), this.reconnectDelay)
+          // Add jitter to prevent thundering herd on reconnect
+          const jitteredDelay = Math.floor(this.reconnectDelay * (0.5 + Math.random()))
+          log('info', 'daemon', 'ws-disconnected', { reconnectIn: jitteredDelay })
+          setTimeout(() => this.reconnect(), jitteredDelay)
           this.reconnectDelay = Math.min(this.reconnectDelay * 2, this.maxReconnectDelay)
         }
       })

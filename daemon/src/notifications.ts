@@ -8,8 +8,9 @@ export function notify(title: string, body: string): void {
     return
   }
 
-  // Use execFile to avoid shell interpretation (prevents command injection via filenames)
-  const script = `display notification "${body.replace(/["\\]/g, '')}" with title "${title.replace(/["\\]/g, '')}"`
+  // Sanitize all characters that could break AppleScript strings
+  const sanitize = (s: string) => s.replace(/["\\`']/g, '')
+  const script = `display notification "${sanitize(body)}" with title "${sanitize(title)}"`
   execFile('osascript', ['-e', script], (err) => {
     if (err) {
       log('debug', 'daemon', 'notification-failed', { error: err.message })

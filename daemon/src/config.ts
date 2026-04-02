@@ -1,4 +1,4 @@
-import { readFile, writeFile, mkdir, unlink } from 'node:fs/promises'
+import { readFile, writeFile, mkdir, unlink, readdir, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -81,4 +81,43 @@ export async function loadSyncState(): Promise<SyncState> {
 
 export async function saveSyncState(state: SyncState): Promise<void> {
   await writeFile(getStatePath(), JSON.stringify(state), { mode: 0o600 })
+}
+
+// ── Log Rotation ───────────────────────────────────────
+
+const LOG_RETENTION_DAYS = 7
+const MAX_LOG_SIZE_BYTES = 10 * 1024 * 1024 // 10MB per file
+
+/** Rotate log file if it exceeds size limit. Delete logs older than retention. */
+export async function rotateLogsIfNeeded(): Promise<void> {
+  const logDir = join(CONFIG_DIR, 'logs')
+  const currentLog = getLogPath()
+
+  try {
+    const logStat = await stat(currentLog)
+    if (logStat.size >= MAX_LOG_SIZE_BYTES) {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-')
+      const rotatedPath = join(logDir, `daemon-${ts}.jsonl`)
+      const { rename } = await import('node:fs/promises')
+      await rename(currentLog, rotatedPath)
+    }
+  } catch {
+    // Log file doesn't exist yet
+  }
+
+  // Clean up old log files
+  try {
+    const cutoff = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000
+    const files = await readdir(logDir)
+    for (const file of files) {
+      if (file === 'daemon.jsonl') continue // Skip current log
+      const filePath = join(logDir, file)
+      try {
+        const fileStat = await stat(filePath)
+        if (fileStat.mtimeMs < cutoff) {
+          await unlink(filePath)
+        }
+      } catch {}
+    }
+  } catch {}
 }

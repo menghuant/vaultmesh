@@ -1,5 +1,7 @@
 import { watch, type FSWatcher } from 'chokidar'
 import { readFile, writeFile, unlink, stat, mkdir } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { createHash } from 'node:crypto'
 import { join, dirname, resolve } from 'node:path'
 import { sha256, log, MAX_FILE_SIZE, type ManifestEntry, type SyncTransport } from '@vaultmesh/shared'
 import type { DaemonConfig } from './config.js'
@@ -18,6 +20,7 @@ export class VaultDaemon {
   private readonly DEBOUNCE_MS = 300
   private readonly STABILITY_WAIT_MS = 100
   private readonly MAX_PARALLEL_DOWNLOADS = 10
+  private readonly WRITE_SUPPRESSION_MS = 2000
 
   constructor(
     private config: DaemonConfig,
@@ -85,7 +88,7 @@ export class VaultDaemon {
         this.pendingWrites.add(oldPath)
         await unlink(oldFull).catch(() => {})
         this.knownHashes.delete(oldPath)
-        setTimeout(() => this.pendingWrites.delete(oldPath), 500)
+        setTimeout(() => this.pendingWrites.delete(oldPath), this.WRITE_SUPPRESSION_MS)
       } catch (err) {
         log('error', 'daemon', 'remote-rename-failed', { oldPath, newPath, error: String(err) })
       }
@@ -200,7 +203,7 @@ export class VaultDaemon {
         // Record hash only after successful write
         this.knownHashes.set(item.path, sha256(content))
         // Remove after a short delay to ensure watcher event is caught
-        setTimeout(() => this.pendingWrites.delete(item.path), 2000)
+        setTimeout(() => this.pendingWrites.delete(item.path), this.WRITE_SUPPRESSION_MS)
 
         log('debug', 'daemon', 'file-downloaded', { path: item.path, sizeBytes: content.length })
       } catch (err) {
@@ -284,8 +287,8 @@ export class VaultDaemon {
       }
 
       await this.uploadLocalFile(relPath)
-    } catch (err: any) {
-      if (err.code === 'ENOENT') return // File was deleted between events
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return // File was deleted between events
       log('error', 'daemon', 'local-change-failed', { path: relPath, error: String(err) })
     }
   }
@@ -367,8 +370,11 @@ export class VaultDaemon {
     try {
       const localContent = await readFile(fullPath)
       const ts = new Date().toISOString().replace(/[:.]/g, '-')
-      const ext = path.includes('.') ? '.' + path.split('.').pop() : ''
-      const baseName = path.replace(/\//g, '__')
+      // Strip extension from baseName to avoid double extension (e.g., readme.md.CONFLICT-...-user.md)
+      const pathWithSlashes = path.replace(/\//g, '__')
+      const lastDot = pathWithSlashes.lastIndexOf('.')
+      const ext = lastDot !== -1 ? pathWithSlashes.slice(lastDot) : ''
+      const baseName = lastDot !== -1 ? pathWithSlashes.slice(0, lastDot) : pathWithSlashes
       const conflictName = `${baseName}.CONFLICT-${ts}-${this.config.userId}${ext}`
       await writeFile(join(conflictsDir, conflictName), localContent)
       log('info', 'daemon', 'conflict-saved', { path, conflictFile: conflictName })
@@ -409,13 +415,24 @@ export class VaultDaemon {
         log('warn', 'daemon', 'delete-conflict', { path, localHash, serverHash: lastKnownHash })
         // Keep local file, will be re-uploaded on next manifest sync
       }
-    } catch (err: any) {
-      if (err.code === 'ENOENT') return // Already deleted
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'code' in err && err.code === 'ENOENT') return // Already deleted
       log('error', 'daemon', 'server-delete-handling-failed', { path, error: String(err) })
     }
   }
 
   // ── Manifest ──────────────────────────────────────────
+
+  /** Compute SHA-256 hash using streaming to avoid loading large files into memory */
+  private streamHash(filePath: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const hash = createHash('sha256')
+      const stream = createReadStream(filePath)
+      stream.on('data', (chunk) => hash.update(chunk))
+      stream.on('end', () => resolve(hash.digest('hex')))
+      stream.on('error', reject)
+    })
+  }
 
   async buildManifest(): Promise<ManifestEntry[]> {
     const { readdir, stat: fsStat } = await import('node:fs/promises')
@@ -433,11 +450,12 @@ export class VaultDaemon {
           await walk(fullPath)
         } else if (item.isFile()) {
           try {
-            const content = await readFile(fullPath)
             const s = await fsStat(fullPath)
+            // Use streaming hash to avoid loading entire file into memory
+            const hash = await this.streamHash(fullPath)
             entries.push({
               path: relPath,
-              hash: sha256(content),
+              hash,
               sizeBytes: s.size,
             })
           } catch {
