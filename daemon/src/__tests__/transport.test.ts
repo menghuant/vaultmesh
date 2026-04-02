@@ -1,19 +1,138 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import type { ManifestEntry, SyncPlan, UploadResult, ServerMessage } from '@vaultmesh/shared'
 
+// Mock fetch globally
+const mockFetch = vi.fn()
+global.fetch = mockFetch as any
+
+import { RealTransport } from '../transport.js'
+import type { DaemonConfig } from '../config.js'
+
+function makeConfig(overrides: Partial<DaemonConfig> = {}): DaemonConfig {
+  return {
+    serverUrl: 'http://localhost:4000',
+    accessToken: 'test-token',
+    refreshToken: 'test-refresh',
+    userId: 'user1',
+    tenantId: 'tenant1',
+    tenantName: 'test',
+    vaultPath: '/tmp/vault',
+    ...overrides,
+  }
+}
+
+function mockResponse(status: number, body: unknown = {}): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    statusText: 'OK',
+    json: () => Promise.resolve(body),
+    arrayBuffer: () => Promise.resolve(Buffer.from(JSON.stringify(body))),
+    headers: new Headers(),
+  } as unknown as Response
+}
+
 describe('RealTransport', () => {
-  describe('HTTP URL construction', () => {
-    it('should encode file paths for upload URL', () => {
-      const serverUrl = 'http://localhost:4000'
-      const path = 'docs/my file (1).md'
-      const url = `${serverUrl}/api/files/${encodeURIComponent(path)}`
-      expect(url).toBe('http://localhost:4000/api/files/docs%2Fmy%20file%20(1).md')
+  let transport: RealTransport
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    transport = new RealTransport(makeConfig(), async () => 'refreshed-token')
+  })
+
+  describe('HTTP methods', () => {
+    it('should send manifest with auth header', async () => {
+      mockFetch.mockResolvedValueOnce(mockResponse(200, { download: [], upload: [], conflict: [], delete: [] }))
+
+      const plan = await transport.sendManifest([{ path: 'test.md', hash: 'abc', sizeBytes: 100 }])
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:4000/api/sync/manifest',
+        expect.objectContaining({
+          method: 'POST',
+          headers: expect.objectContaining({
+            'Authorization': 'Bearer test-token',
+            'Content-Type': 'application/json',
+          }),
+        }),
+      )
+      expect(plan.download).toEqual([])
     })
 
-    it('should handle special characters in path', () => {
-      const path = 'projects/日本語/readme.md'
-      const encoded = encodeURIComponent(path)
-      expect(decodeURIComponent(encoded)).toBe(path)
+    it('should encode file paths in URLs', async () => {
+      mockFetch.mockResolvedValueOnce(mockResponse(200, Buffer.from('content')))
+
+      await transport.downloadFile('docs/my file (1).md').catch(() => {})
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:4000/api/files/docs%2Fmy%20file%20(1).md',
+        expect.anything(),
+      )
+    })
+
+    it('should refresh token on 401 and retry', async () => {
+      mockFetch
+        .mockResolvedValueOnce(mockResponse(401)) // First call returns 401
+        .mockResolvedValueOnce(mockResponse(200, { download: [], upload: [], conflict: [], delete: [] })) // Retry succeeds
+
+      const plan = await transport.sendManifest([])
+
+      expect(mockFetch).toHaveBeenCalledTimes(2)
+      // Second call should use refreshed token
+      const secondCall = mockFetch.mock.calls[1]!
+      expect((secondCall[1] as any).headers['Authorization']).toBe('Bearer refreshed-token')
+    })
+
+    it('should retry on 503 with exponential backoff', async () => {
+      mockFetch
+        .mockResolvedValueOnce(mockResponse(503))
+        .mockResolvedValueOnce(mockResponse(200, { download: [], upload: [], conflict: [], delete: [] }))
+
+      const plan = await transport.sendManifest([])
+      expect(mockFetch).toHaveBeenCalledTimes(2)
+    })
+
+    it('should retry on network error', async () => {
+      mockFetch
+        .mockRejectedValueOnce(new Error('fetch failed'))
+        .mockResolvedValueOnce(mockResponse(200, { download: [], upload: [], conflict: [], delete: [] }))
+
+      const plan = await transport.sendManifest([])
+      expect(mockFetch).toHaveBeenCalledTimes(2)
+    })
+
+    it('should give up after MAX_RETRIES', async () => {
+      mockFetch.mockRejectedValue(new Error('persistent failure'))
+
+      await expect(transport.sendManifest([])).rejects.toThrow('persistent failure')
+      expect(mockFetch).toHaveBeenCalledTimes(4) // 1 initial + 3 retries
+    })
+
+    it('should send upload with base hash header', async () => {
+      mockFetch.mockResolvedValueOnce(mockResponse(200, { accepted: true, version: 1 }))
+
+      await transport.uploadFile('test.md', Buffer.from('content'), 'abc123')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:4000/api/files/test.md',
+        expect.objectContaining({
+          method: 'PUT',
+          headers: expect.objectContaining({
+            'X-Base-Hash': 'abc123',
+          }),
+        }),
+      )
+    })
+
+    it('should send delete request', async () => {
+      mockFetch.mockResolvedValueOnce(mockResponse(200))
+
+      await transport.deleteFile('old.md')
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        'http://localhost:4000/api/files/old.md',
+        expect.objectContaining({ method: 'DELETE' }),
+      )
     })
   })
 
@@ -31,105 +150,39 @@ describe('RealTransport', () => {
     })
   })
 
-  describe('manifest entry format', () => {
-    it('should create valid manifest entries', () => {
-      const entry: ManifestEntry = {
-        path: 'docs/readme.md',
-        hash: 'a'.repeat(64),
-        sizeBytes: 1024,
-      }
-      expect(entry.path).toBe('docs/readme.md')
-      expect(entry.hash).toHaveLength(64)
-      expect(entry.sizeBytes).toBe(1024)
+  describe('notifyFileChanged/notifyFileDeleted', () => {
+    it('should not throw when ws is null', () => {
+      expect(() => transport.notifyFileChanged('test.md', 'hash', 100)).not.toThrow()
+      expect(() => transport.notifyFileDeleted('test.md')).not.toThrow()
     })
   })
 
-  describe('sync plan response', () => {
-    it('should handle empty sync plan', () => {
-      const plan: SyncPlan = {
-        download: [],
-        upload: [],
-        conflict: [],
-        delete: [],
-      }
-      expect(plan.download).toHaveLength(0)
-    })
-
-    it('should handle plan with all categories', () => {
-      const plan: SyncPlan = {
-        download: [{ path: 'new.md', hash: 'a'.repeat(64), sizeBytes: 100 }],
-        upload: [{ path: 'local.md' }],
-        conflict: [{ path: 'both.md', serverHash: 'a'.repeat(64), localHash: 'b'.repeat(64) }],
-        delete: [{ path: 'removed.md', lastKnownHash: 'c'.repeat(64) }],
-      }
-      expect(plan.download).toHaveLength(1)
-      expect(plan.upload).toHaveLength(1)
-      expect(plan.conflict).toHaveLength(1)
-      expect(plan.delete).toHaveLength(1)
+  describe('isConnected', () => {
+    it('should return false when not connected', () => {
+      expect(transport.isConnected()).toBe(false)
     })
   })
 
-  describe('upload result handling', () => {
-    it('should handle accepted upload', () => {
-      const result: UploadResult = { accepted: true, version: 1 }
-      expect(result.accepted).toBe(true)
-      expect(result.conflict).toBeUndefined()
-    })
-
-    it('should handle conflict upload', () => {
-      const result: UploadResult = {
-        accepted: false,
-        conflict: { serverHash: 'a'.repeat(64), clientHash: 'b'.repeat(64) },
-        version: 3,
-      }
-      expect(result.accepted).toBe(false)
-      expect(result.conflict?.serverHash).toHaveLength(64)
+  describe('disconnect', () => {
+    it('should not throw when already disconnected', () => {
+      expect(() => transport.disconnect()).not.toThrow()
     })
   })
 
-  describe('server message parsing', () => {
-    it('should parse remote-change message', () => {
-      const raw = '{"type":"remote-change","path":"test.md","hash":"abc","updatedBy":"user1","updatedAt":"2026-04-01T00:00:00Z"}'
-      const msg = JSON.parse(raw) as ServerMessage
-      expect(msg.type).toBe('remote-change')
-      if (msg.type === 'remote-change') {
-        expect(msg.path).toBe('test.md')
-        expect(msg.updatedBy).toBe('user1')
-      }
-    })
-
-    it('should handle invalid JSON gracefully', () => {
-      const raw = 'not valid json'
-      let parsed = false
-      try {
-        JSON.parse(raw)
-        parsed = true
-      } catch {
-        parsed = false
-      }
-      expect(parsed).toBe(false)
-    })
-  })
-
-  describe('reconnection logic', () => {
-    it('should use exponential backoff', () => {
-      let delay = 1000
-      const maxDelay = 30_000
+  describe('reconnection jitter', () => {
+    it('should produce jittered delays within expected range', () => {
+      const baseDelay = 1000
       const delays: number[] = []
 
-      for (let i = 0; i < 6; i++) {
-        delays.push(delay)
-        delay = Math.min(delay * 2, maxDelay)
+      for (let i = 0; i < 100; i++) {
+        delays.push(Math.floor(baseDelay * (0.5 + Math.random())))
       }
 
-      expect(delays).toEqual([1000, 2000, 4000, 8000, 16000, 30000])
-    })
-
-    it('should reset delay on successful connect', () => {
-      let delay = 16000 // After several failures
-      // Successful connect resets
-      delay = 1000
-      expect(delay).toBe(1000)
+      // All delays should be between 500 and 1500
+      expect(delays.every(d => d >= 500 && d < 1500)).toBe(true)
+      // Should have variance (not all the same)
+      const uniqueDelays = new Set(delays)
+      expect(uniqueDelays.size).toBeGreaterThan(10)
     })
   })
 })
