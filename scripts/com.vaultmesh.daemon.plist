@@ -18,9 +18,9 @@
     <false/>
   </dict>
   <key>StandardOutPath</key>
-  <string>/tmp/vaultmesh-daemon.out.log</string>
+  <string>__HOME__/.vaultmesh/logs/vaultmesh-daemon.out.log</string>
   <key>StandardErrorPath</key>
-  <string>/tmp/vaultmesh-daemon.err.log</string>
+  <string>__HOME__/.vaultmesh/logs/vaultmesh-daemon.err.log</string>
   <key>ProcessType</key>
   <string>Background</string>
 </dict>

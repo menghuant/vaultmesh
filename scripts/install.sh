@@ -106,6 +106,27 @@ main() {
   rm -rf "${tmp_dir}"
 
   info "Installed ${BINARY_NAME} to ${INSTALL_DIR}/${BINARY_NAME}"
+
+  # Install launchd plist on macOS for auto-start
+  if [ "$(uname -s)" = "Darwin" ]; then
+    local plist_url="${server_url}/releases/com.vaultmesh.daemon.plist"
+    local launch_agents_dir="${HOME}/Library/LaunchAgents"
+    local plist_dest="${launch_agents_dir}/com.vaultmesh.daemon.plist"
+
+    mkdir -p "${launch_agents_dir}"
+    mkdir -p "${HOME}/.vaultmesh/logs"
+
+    if curl -fsSL -o "${plist_dest}.tmp" "${plist_url}" 2>/dev/null; then
+      # Substitute __HOME__ with actual home directory
+      sed "s|__HOME__|${HOME}|g" "${plist_dest}.tmp" > "${plist_dest}"
+      rm -f "${plist_dest}.tmp"
+      info "Installed launchd plist to ${plist_dest}"
+      dim "  Auto-start will activate after: vaultmesh setup --token <your-token>"
+    else
+      dim "  Launchd plist not available from server, skipping auto-start setup."
+    fi
+  fi
+
   echo ""
   dim "Next steps:"
   dim "  1. Get an invite token from your admin"
