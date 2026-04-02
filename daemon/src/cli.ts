@@ -26,6 +26,20 @@ function success(msg: string): void { console.log(`${green('✓')} ${msg}`) }
 function error(msg: string): void { console.error(`${red('✗')} ${msg}`) }
 function warn(msg: string): void { console.log(`${yellow('!')} ${msg}`) }
 
+function validateServerUrl(url: string): string {
+  try {
+    const parsed = new URL(url)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      error(`Server URL must use http:// or https:// (got ${parsed.protocol})`)
+      process.exit(1)
+    }
+    return parsed.origin
+  } catch {
+    error(`Invalid server URL: ${url}`)
+    process.exit(1)
+  }
+}
+
 async function requireConfig(): Promise<DaemonConfig> {
   const config = await loadConfig()
   if (!config) {
@@ -154,10 +168,11 @@ program
   .requiredOption('--tenant <id>', 'Tenant ID')
   .option('--path <dir>', 'Custom vault path')
   .action(async (opts: { email: string; server: string; tenant: string; path?: string }) => {
+    const serverUrl = validateServerUrl(opts.server)
     const password = await promptPassword('Password: ')
 
     try {
-      const res = await fetch(`${opts.server}/api/auth/login`, {
+      const res = await fetch(`${serverUrl}/api/auth/login`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: opts.email, password, tenantId: opts.tenant }),
@@ -175,7 +190,7 @@ program
 
       await ensureConfigDir()
       await saveConfig({
-        serverUrl: opts.server,
+        serverUrl: serverUrl,
         accessToken: data.accessToken,
         refreshToken: data.refreshToken,
         userId: data.userId,
@@ -244,6 +259,7 @@ admin
   .requiredOption('--tenant-name <name>', 'Tenant name')
   .option('--path <dir>', 'Custom vault path')
   .action(async (opts: { email: string; server: string; tenantName: string; path?: string }) => {
+    const serverUrl = validateServerUrl(opts.server)
     const password = await promptPassword('Set admin password: ')
     if (!password || password.length < 8) {
       error('Password must be at least 8 characters')
@@ -251,7 +267,7 @@ admin
     }
 
     try {
-      const res = await fetch(`${opts.server}/api/auth/signup`, {
+      const res = await fetch(`${serverUrl}/api/auth/signup`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: opts.email, password, tenantName: opts.tenantName }),
@@ -269,7 +285,7 @@ admin
 
       await ensureConfigDir()
       await saveConfig({
-        serverUrl: opts.server,
+        serverUrl: serverUrl,
         accessToken: data.accessToken,
         refreshToken: data.refreshToken,
         userId: data.userId,

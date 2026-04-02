@@ -56,7 +56,7 @@ export async function loadConfig(): Promise<DaemonConfig | null> {
 
 export async function saveConfig(config: DaemonConfig): Promise<void> {
   await ensureConfigDir()
-  await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2))
+  await writeFile(CONFIG_FILE, JSON.stringify(config, null, 2), { mode: 0o600 })
 }
 
 export async function deleteConfig(): Promise<void> {

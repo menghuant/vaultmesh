@@ -1,4 +1,4 @@
-import { exec } from 'node:child_process'
+import { execFile } from 'node:child_process'
 import { log } from '@vaultmesh/shared'
 
 /** Send a macOS desktop notification using osascript */
@@ -8,12 +8,9 @@ export function notify(title: string, body: string): void {
     return
   }
 
-  // Escape special characters for AppleScript
-  const safeTitle = title.replace(/"/g, '\\"')
-  const safeBody = body.replace(/"/g, '\\"')
-
-  const script = `display notification "${safeBody}" with title "${safeTitle}"`
-  exec(`osascript -e '${script}'`, (err) => {
+  // Use execFile to avoid shell interpretation (prevents command injection via filenames)
+  const script = `display notification "${body.replace(/["\\]/g, '')}" with title "${title.replace(/["\\]/g, '')}"`
+  execFile('osascript', ['-e', script], (err) => {
     if (err) {
       log('debug', 'daemon', 'notification-failed', { error: err.message })
     }

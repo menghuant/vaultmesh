@@ -27,6 +27,7 @@ const server = serve({
     return app.fetch(req, { ip: server.requestIP(req) })
   },
   websocket: {
+    maxPayloadLength: 64 * 1024, // 64KB max for control messages
     open(ws: import('bun').ServerWebSocket<WSData>) {
       log('debug', 'ws', 'connection-opened', { connectionId: ws.data.connectionId })
       startAuthTimeout(ws.data.connectionId, ws)

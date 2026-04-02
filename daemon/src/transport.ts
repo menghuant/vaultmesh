@@ -11,6 +11,8 @@ type RemoteChangeCb = (change: RemoteChange) => void
 type ConflictCb = (conflict: ConflictEvent) => void
 type PermissionRevokedCb = (paths: string[]) => void
 type PermissionGrantedCb = (paths: string[]) => void
+type RemoteDeleteCb = (path: string, deletedBy: string) => void
+type RemoteRenameCb = (oldPath: string, newPath: string) => void
 
 export class RealTransport implements SyncTransport {
   private ws: WebSocket | null = null
@@ -18,6 +20,8 @@ export class RealTransport implements SyncTransport {
   private conflictCallbacks: ConflictCb[] = []
   private permRevokedCallbacks: PermissionRevokedCb[] = []
   private permGrantedCallbacks: PermissionGrantedCb[] = []
+  private remoteDeleteCallbacks: RemoteDeleteCb[] = []
+  private remoteRenameCallbacks: RemoteRenameCb[] = []
   private reconnectDelay = 1000
   private maxReconnectDelay = 30_000
   private shuttingDown = false
@@ -144,6 +148,9 @@ export class RealTransport implements SyncTransport {
         this.ws = null
         this.stopPing()
 
+        // Reject the connect promise if auth hasn't resolved yet
+        reject(new Error('WebSocket closed before authentication'))
+
         if (!this.shuttingDown) {
           log('info', 'daemon', 'ws-disconnected', { reconnectIn: this.reconnectDelay })
           setTimeout(() => this.reconnect(), this.reconnectDelay)
@@ -207,8 +214,15 @@ export class RealTransport implements SyncTransport {
         break
 
       case 'remote-delete':
+        for (const cb of this.remoteDeleteCallbacks) {
+          cb(msg.path, msg.deletedBy)
+        }
+        break
+
       case 'remote-rename':
-        // Handled via manifest sync on next cycle
+        for (const cb of this.remoteRenameCallbacks) {
+          cb(msg.oldPath, msg.newPath)
+        }
         break
     }
   }
@@ -268,6 +282,14 @@ export class RealTransport implements SyncTransport {
 
   onPermissionGranted(cb: PermissionGrantedCb): void {
     this.permGrantedCallbacks.push(cb)
+  }
+
+  onRemoteDelete(cb: RemoteDeleteCb): void {
+    this.remoteDeleteCallbacks.push(cb)
+  }
+
+  onRemoteRename(cb: RemoteRenameCb): void {
+    this.remoteRenameCallbacks.push(cb)
   }
 
   // ── Lifecycle ──────────────────────────────────────────

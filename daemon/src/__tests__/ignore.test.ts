@@ -21,15 +21,18 @@ describe('IgnoreFilter', () => {
       expect(filter.isIgnored('file.txt')).toBe(false)
     })
 
-    it('should ignore .git/ directory', () => {
+    it('should ignore .git/ directory and files inside it', () => {
       const filter = new IgnoreFilter(['.git/'])
       expect(filter.isIgnored('.git', true)).toBe(true)
-      expect(filter.isIgnored('.git')).toBe(false) // dirOnly, file does not match
+      expect(filter.isIgnored('.git/config')).toBe(true)
+      expect(filter.isIgnored('.git/objects/abc')).toBe(true)
+      expect(filter.isIgnored('.gitignore')).toBe(false) // not inside .git/
     })
 
-    it('should ignore node_modules/', () => {
+    it('should ignore node_modules/ and files inside it', () => {
       const filter = new IgnoreFilter(['node_modules/'])
       expect(filter.isIgnored('node_modules', true)).toBe(true)
+      expect(filter.isIgnored('node_modules/package/index.js')).toBe(true)
     })
   })
 

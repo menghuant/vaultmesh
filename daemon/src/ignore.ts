@@ -49,11 +49,24 @@ export class IgnoreFilter {
   isIgnored(filePath: string, isDir = false): boolean {
     // Normalize to forward slashes
     const normalized = filePath.replace(/\\/g, '/')
+    const basename = normalized.split('/').pop()!
     let ignored = false
 
-    for (const { negated, dirOnly, regex } of this.patterns) {
-      if (dirOnly && !isDir) continue
-      if (regex.test(normalized) || regex.test(normalized.split('/').pop()!)) {
+    for (const { negated, dirOnly, regex, pattern } of this.patterns) {
+      // For dirOnly patterns: match the directory name OR any path under it
+      // This ensures .git/ matches both ".git" (the dir) and ".git/config" (files inside)
+      if (dirOnly) {
+        // Get the effective pattern name (without trailing /)
+        const dirName = pattern.replace(/^!/, '').replace(/\/$/, '').replace(/^\//, '')
+        if (isDir && (regex.test(normalized) || regex.test(basename))) {
+          ignored = !negated
+        } else if (normalized === dirName || normalized.startsWith(dirName + '/') ||
+                   basename === dirName || normalized.includes('/' + dirName + '/')) {
+          ignored = !negated
+        }
+        continue
+      }
+      if (regex.test(normalized) || regex.test(basename)) {
         ignored = !negated
       }
     }

@@ -161,6 +161,8 @@ class ConnectionManager {
     }
     this.connections.clear()
     this.tenants.clear()
+    // Clean up all pending auth timers
+    clearAllAuthTimeouts()
   }
 }
 
@@ -173,6 +175,13 @@ export const connectionManager = new ConnectionManager()
 const AUTH_TIMEOUT_MS = 10_000 // 10s to authenticate after connecting
 
 const pendingAuth = new Map<string, ReturnType<typeof setTimeout>>()
+
+function clearAllAuthTimeouts(): void {
+  for (const timer of pendingAuth.values()) {
+    clearTimeout(timer)
+  }
+  pendingAuth.clear()
+}
 
 export function startAuthTimeout(connId: string, ws: ServerWebSocket<WSData>): void {
   const timer = setTimeout(() => {
@@ -233,7 +242,7 @@ export async function handleMessage(ws: ServerWebSocket<WSData>, raw: string | B
   switch (msg.type) {
     case 'ping':
       ws.send(JSON.stringify({ type: 'pong' }))
-      connectionManager.recordPong(connId)
+      // Pong tracking handled by protocol-level pong in handlePong, not here
       break
 
     case 'file-changed':

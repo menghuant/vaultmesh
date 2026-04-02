@@ -1,6 +1,6 @@
 import { watch, type FSWatcher } from 'chokidar'
 import { readFile, writeFile, unlink, stat, mkdir } from 'node:fs/promises'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { sha256, log, MAX_FILE_SIZE, type ManifestEntry } from '@vaultmesh/shared'
 import type { RealTransport } from './transport.js'
 import type { DaemonConfig } from './config.js'
@@ -24,6 +24,16 @@ export class VaultDaemon {
     private config: DaemonConfig,
     private transport: RealTransport,
   ) {}
+
+  /** Resolve a relative path safely within the vault. Throws on traversal. */
+  private safePath(relPath: string): string {
+    const fullPath = resolve(this.config.vaultPath, relPath)
+    const vaultRoot = resolve(this.config.vaultPath)
+    if (!fullPath.startsWith(vaultRoot + '/') && fullPath !== vaultRoot) {
+      throw new Error(`Path traversal blocked: ${relPath}`)
+    }
+    return fullPath
+  }
 
   async start(): Promise<void> {
     log('info', 'daemon', 'starting', { vaultPath: this.config.vaultPath })
@@ -54,6 +64,32 @@ export class VaultDaemon {
     this.transport.onPermissionRevoked((paths) => {
       log('info', 'daemon', 'permission-revoked', { paths })
       notifyPermissionRevoked(paths)
+    })
+
+    this.transport.onRemoteDelete(async (path, deletedBy) => {
+      log('info', 'daemon', 'remote-delete', { path, deletedBy })
+      try {
+        // Server deleted this file. Check hash before local delete.
+        const knownHash = this.knownHashes.get(path) || ''
+        await this.handleServerDelete(path, knownHash)
+      } catch (err) {
+        log('error', 'daemon', 'remote-delete-failed', { path, error: String(err) })
+      }
+    })
+
+    this.transport.onRemoteRename(async (oldPath, newPath) => {
+      log('info', 'daemon', 'remote-rename', { oldPath, newPath })
+      try {
+        // Download the file at the new path, delete old
+        await this.handleRemoteChange(newPath)
+        const oldFull = this.safePath(oldPath)
+        this.pendingWrites.add(oldPath)
+        await unlink(oldFull).catch(() => {})
+        this.knownHashes.delete(oldPath)
+        setTimeout(() => this.pendingWrites.delete(oldPath), 500)
+      } catch (err) {
+        log('error', 'daemon', 'remote-rename-failed', { oldPath, newPath, error: String(err) })
+      }
     })
 
     this.transport.onPermissionGranted(async (paths) => {
@@ -158,7 +194,7 @@ export class VaultDaemon {
 
       try {
         const content = await this.transport.downloadFile(item.path)
-        const fullPath = join(this.config.vaultPath, item.path)
+        const fullPath = this.safePath(item.path)
         await mkdir(dirname(fullPath), { recursive: true })
 
         // Mark as pending write to suppress watcher upload
@@ -256,7 +292,7 @@ export class VaultDaemon {
   }
 
   private async uploadLocalFile(relPath: string): Promise<void> {
-    const fullPath = join(this.config.vaultPath, relPath)
+    const fullPath = this.safePath(relPath)
     const content = await readFile(fullPath)
     const hash = sha256(content)
     // Use the last known server hash as baseHash (empty for new files)
@@ -286,6 +322,10 @@ export class VaultDaemon {
     const relPath = getRelativePath(this.config.vaultPath, fullPath)
     if (!relPath) return
 
+    // Clear any pending debounce timer for this path
+    const timer = this.debounceTimers.get(relPath)
+    if (timer) { clearTimeout(timer); this.debounceTimers.delete(relPath) }
+
     // Write-back loop suppression
     if (this.pendingWrites.has(relPath)) {
       this.pendingWrites.delete(relPath)
@@ -297,6 +337,7 @@ export class VaultDaemon {
     try {
       await this.transport.deleteFile(relPath)
       this.transport.notifyFileDeleted(relPath)
+      this.knownHashes.delete(relPath)
       log('info', 'daemon', 'file-deleted-remote', { path: relPath })
     } catch (err) {
       log('error', 'daemon', 'remote-delete-failed', { path: relPath, error: String(err) })
@@ -307,7 +348,7 @@ export class VaultDaemon {
 
   private async handleRemoteChange(path: string): Promise<void> {
     const content = await this.transport.downloadFile(path)
-    const fullPath = join(this.config.vaultPath, path)
+    const fullPath = this.safePath(path)
     await mkdir(dirname(fullPath), { recursive: true })
 
     this.pendingWrites.add(path)
@@ -323,7 +364,7 @@ export class VaultDaemon {
     await mkdir(conflictsDir, { recursive: true })
 
     // Save local version as conflict copy
-    const fullPath = join(this.config.vaultPath, path)
+    const fullPath = this.safePath(path)
     try {
       const localContent = await readFile(fullPath)
       const ts = new Date().toISOString().replace(/[:.]/g, '-')
@@ -348,7 +389,7 @@ export class VaultDaemon {
   }
 
   private async handleServerDelete(path: string, lastKnownHash: string): Promise<void> {
-    const fullPath = join(this.config.vaultPath, path)
+    const fullPath = this.safePath(path)
 
     try {
       // Check if local file matches the server's last known hash
@@ -359,6 +400,7 @@ export class VaultDaemon {
         // Same content, safe to delete locally
         this.pendingWrites.add(path)
         await unlink(fullPath)
+        this.knownHashes.delete(path)
         setTimeout(() => this.pendingWrites.delete(path), 500)
         log('info', 'daemon', 'file-deleted-local', { path })
       } else {
