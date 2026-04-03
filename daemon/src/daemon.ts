@@ -38,6 +38,7 @@ export class VaultDaemon {
   }
 
   async start(): Promise<void> {
+    this.shuttingDown = false
     log('info', 'daemon', 'starting', { vaultPath: this.config.vaultPath })
 
     // Ensure vault directory exists
