@@ -1,4 +1,4 @@
-import { eq, and, lt } from 'drizzle-orm'
+import { eq, and, lt, isNull } from 'drizzle-orm'
 import { SignJWT, jwtVerify, type JWTPayload as JosePayload } from 'jose'
 import { hash, verify } from '@node-rs/argon2'
 import {
@@ -281,7 +281,7 @@ export async function redeem(db: Database, req: RedeemRequest): Promise<RedeemRe
     // Mark invite as redeemed first (prevents concurrent redeem)
     const updated = await tx.update(inviteTokens)
       .set({ redeemedAt: new Date() })
-      .where(and(eq(inviteTokens.id, invite.id), eq(inviteTokens.redeemedAt, null as any)))
+      .where(and(eq(inviteTokens.id, invite.id), isNull(inviteTokens.redeemedAt)))
       .returning({ id: inviteTokens.id })
 
     if (updated.length === 0) {
