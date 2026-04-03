@@ -155,14 +155,18 @@ api.post('/sync/manifest', async (c) => {
 
 api.get('/files/*/versions', async (c) => {
   const user = c.get('user')
-  const filePath = decodeFilePath(c.req.path.replace('/api/files/', '').replace('/versions', ''))
+  // Strip /versions suffix anchored to end to avoid mangling paths containing "versions"
+  const rawPath = c.req.path.replace('/api/files/', '').replace(/\/versions$/, '')
+  const filePath = decodeFilePath(rawPath)
   const versions = await sync.getFileVersions(db, user.tenant_id, user.sub, filePath)
   return c.json(versions)
 })
 
 api.post('/files/*/restore', async (c) => {
   const user = c.get('user')
-  const filePath = decodeFilePath(c.req.path.replace('/api/files/', '').replace('/restore', ''))
+  // Strip /restore suffix anchored to end to avoid mangling paths containing "restore"
+  const rawPath = c.req.path.replace('/api/files/', '').replace(/\/restore$/, '')
+  const filePath = decodeFilePath(rawPath)
   const body = await c.req.json()
   const version = typeof body.version === 'number' ? body.version : parseInt(body.version, 10)
   if (isNaN(version) || version < 1) {

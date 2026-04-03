@@ -69,7 +69,7 @@ export class RealTransport implements SyncTransport {
 
   /** Fetch with automatic 401 retry after token refresh + transient failure retry */
   private async fetchWithAuth(url: string, init: RequestInit = {}): Promise<Response> {
-    const headers = { ...await this.authHeaders(), ...((init.headers as Record<string, string>) || {}) }
+    let headers = { ...await this.authHeaders(), ...((init.headers as Record<string, string>) || {}) }
     let res: Response
     let lastError: unknown
 
@@ -79,8 +79,9 @@ export class RealTransport implements SyncTransport {
 
         if (res.status === 401 && attempt === 0) {
           await this.doRefresh()
-          const retryHeaders = { ...await this.authHeaders(), ...((init.headers as Record<string, string>) || {}) }
-          res = await fetch(url, { ...init, headers: retryHeaders })
+          // Update headers for this and all subsequent attempts
+          headers = { ...await this.authHeaders(), ...((init.headers as Record<string, string>) || {}) }
+          res = await fetch(url, { ...init, headers })
         }
 
         if (!RealTransport.isRetriable(res.status) || attempt === RealTransport.MAX_RETRIES) {
