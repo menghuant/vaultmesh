@@ -5,7 +5,7 @@ import { homedir } from 'node:os'
 import { decodeInviteToken, log, setLogLevel } from '@vaultmesh/shared'
 import {
   loadConfig, saveConfig, deleteConfig, ensureConfigDir,
-  getPidPath, getLogPath, getConflictsDir,
+  getPidPath, getLogPath, getConflictsDir, rotateLogsIfNeeded,
   type DaemonConfig,
 } from './config.js'
 
@@ -719,6 +719,9 @@ daemonCmd
     }
 
     success('Starting sync daemon...')
+
+    // Rotate logs on startup
+    await rotateLogsIfNeeded().catch(() => {})
 
     // Import and start daemon
     const { VaultDaemon } = await import('./daemon.js')

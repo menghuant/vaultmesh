@@ -5,7 +5,7 @@ import * as auth from './auth.js'
 import * as sync from './sync.js'
 import * as permissions from './permissions.js'
 import { AppError, ErrorCode, groups as groupsTable, groupMembers as gmTable, users as usersTable, type ManifestRequest } from '@vaultmesh/shared'
-import { eq as eqImport } from 'drizzle-orm'
+import { eq as eqImport, inArray } from 'drizzle-orm'
 
 const app = new Hono()
 
@@ -257,18 +257,18 @@ admin.get('/groups', async (c) => {
     .from(groupsTable)
     .where(eqImport(groupsTable.tenantId, user.tenant_id))
 
-  // Batch fetch all members for all groups to avoid N+1
+  // Batch fetch all members for these groups only (tenant-scoped via groupIds)
   const groupIds = allGroups.map(g => g.id)
   const allMembers = groupIds.length > 0
     ? await db.select({ groupId: gmTable.groupId, userId: gmTable.userId, email: usersTable.email })
         .from(gmTable)
         .innerJoin(usersTable, eqImport(usersTable.id, gmTable.userId))
+        .where(inArray(gmTable.groupId, groupIds))
     : []
 
   // Group members by groupId in memory
   const membersByGroup = new Map<string, { userId: string; email: string }[]>()
   for (const m of allMembers) {
-    if (!groupIds.includes(m.groupId)) continue
     if (!membersByGroup.has(m.groupId)) membersByGroup.set(m.groupId, [])
     membersByGroup.get(m.groupId)!.push({ userId: m.userId, email: m.email })
   }

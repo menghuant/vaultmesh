@@ -10,7 +10,7 @@ import {
   log,
 } from '@vaultmesh/shared'
 import type { Database } from './db.js'
-import { storeFile, readStoredFile, deleteStoredFile, deleteVersionBlob } from './storage.js'
+import { storeFile, readStoredFile, readVersion, deleteStoredFile, deleteVersionBlob } from './storage.js'
 import { resolvePermission, canRead, canWrite } from './permissions.js'
 
 // ── Permission Pre-fetch (#11: fix N+1) ──────────────────
@@ -455,7 +455,6 @@ export async function restoreFileVersion(
 
   const targetVersion = versions[versionNumber - 1]!
   // Read content from the version's stored blob (not the current file)
-  const { readVersion } = await import('./storage.js')
   const content = await readVersion(tenantId, targetVersion.contentHash)
 
   // Get current server hash for proper conflict detection on re-upload
